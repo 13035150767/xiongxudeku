@@ -1,0 +1,472 @@
+import cv2
+import numpy as np
+import matplotlib.pyplot as plt
+import os
+
+TEST_IMAGES_DIR = r"E:\PythonProject\计算机视觉\智能车道检测\test_images"
+TEST_OUTPUT_DIR = r"E:\PythonProject\计算机视觉\智能车道检测\结果"
+
+prev_left_line = None
+prev_right_line = None
+
+
+def enhance_image(image):
+    lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
+    l, a, b = cv2.split(lab)
+    
+    clahe = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8, 8))
+    l_enhanced = clahe.apply(l)
+    
+    lab_enhanced = cv2.merge([l_enhanced, a, b])
+    enhanced = cv2.cvtColor(lab_enhanced, cv2.COLOR_LAB2BGR)
+    
+    return enhanced
+
+
+def select_white_yellow_colors_hsl(image):
+    hsl = cv2.cvtColor(image, cv2.COLOR_BGR2HLS)
+    
+    white_lower = np.array([0, 200, 0], dtype=np.uint8)
+    white_upper = np.array([180, 255, 255], dtype=np.uint8)
+    white_mask = cv2.inRange(hsl, white_lower, white_upper)
+    
+    yellow_lower = np.array([10, 50, 80], dtype=np.uint8)
+    yellow_upper = np.array([40, 255, 255], dtype=np.uint8)
+    yellow_mask = cv2.inRange(hsl, yellow_lower, yellow_upper)
+    
+    mask = cv2.bitwise_or(white_mask, yellow_mask)
+    return cv2.bitwise_and(image, image, mask=mask)
+
+
+def canny_edge_detection(image, low_threshold=50, high_threshold=150):
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+    edges = cv2.Canny(blurred, low_threshold, high_threshold)
+    return edges
+
+
+def create_roi_mask(image_shape, vertices):
+    mask = np.zeros(image_shape[:2], dtype=np.uint8)
+    cv2.fillPoly(mask, [vertices], 255)
+    return mask
+
+
+def apply_roi(image, mask):
+    return cv2.bitwise_and(image, image, mask=mask)
+
+
+def create_left_right_roi(image_shape):
+    height, width = image_shape[:2]
+    
+    left_vertices = np.array([[
+        [width * 0.05, height],
+        [width * 0.05, height * 0.95],
+        [width * 0.25, height * 0.55],
+        [width * 0.45, height * 0.55],
+        [width * 0.45, height * 0.95],
+        [width * 0.45, height]
+    ]], dtype=np.int32)
+    
+    right_vertices = np.array([[
+        [width * 0.55, height],
+        [width * 0.55, height * 0.95],
+        [width * 0.55, height * 0.55],
+        [width * 0.75, height * 0.55],
+        [width * 0.95, height * 0.95],
+        [width * 0.95, height]
+    ]], dtype=np.int32)
+    
+    left_mask = create_roi_mask(image_shape, left_vertices)
+    right_mask = create_roi_mask(image_shape, right_vertices)
+    
+    return left_mask, right_mask
+
+
+def hough_lines(image, rho=1, theta=np.pi/180, threshold=25, min_line_len=20, max_line_gap=20):
+    lines = cv2.HoughLinesP(image, rho, theta, threshold, np.array([]),
+                              minLineLength=min_line_len, maxLineGap=max_line_gap)
+    return lines
+
+
+def validate_line_properties(line, image_shape, side):
+    height, width = image_shape[:2]
+    x1, y1, x2, y2 = line
+    
+    if x2 == x1:
+        return False
+    
+    slope = (y2 - y1) / (x2 - x1)
+    
+    if side == 'left':
+        if slope > -0.4 or slope < -1.5:
+            return False
+        mid_x = (x1 + x2) / 2
+        if mid_x > width * 0.5:
+            return False
+    else:
+        if slope < 0.4 or slope > 1.5:
+            return False
+        mid_x = (x1 + x2) / 2
+        if mid_x < width * 0.5:
+            return False
+    
+    line_length = np.sqrt((x2 - x1)**2 + (y2 - y1)**2)
+    if line_length < 30:
+        return False
+    
+    return True
+
+
+def cluster_lines_by_slope_position(lines, image_shape, side):
+    if lines is None or len(lines) == 0:
+        return []
+    
+    valid_lines = []
+    for line in lines:
+        x1, y1, x2, y2 = line[0]
+        if validate_line_properties((x1, y1, x2, y2), image_shape, side):
+            valid_lines.append((x1, y1, x2, y2))
+    
+    if len(valid_lines) == 0:
+        return []
+    
+    clusters = []
+    used = [False] * len(valid_lines)
+    
+    for i, line1 in enumerate(valid_lines):
+        if used[i]:
+            continue
+        
+        cluster = [line1]
+        used[i] = True
+        
+        x1_i, y1_i, x2_i, y2_i = line1
+        slope_i = (y2_i - y1_i) / (x2_i - x1_i) if x2_i != x1_i else 0
+        mid_x_i = (x1_i + x2_i) / 2
+        
+        for j, line2 in enumerate(valid_lines):
+            if used[j]:
+                continue
+            
+            x1_j, y1_j, x2_j, y2_j = line2
+            slope_j = (y2_j - y1_j) / (x2_j - x1_j) if x2_j != x1_j else 0
+            mid_x_j = (x1_j + x2_j) / 2
+            
+            slope_diff = abs(slope_i - slope_j)
+            pos_diff = abs(mid_x_i - mid_x_j)
+            
+            if slope_diff < 0.15 and pos_diff < 50:
+                cluster.append(line2)
+                used[j] = True
+        
+        clusters.append(cluster)
+    
+    return clusters
+
+
+def select_best_cluster(clusters):
+    if not clusters:
+        return None
+    
+    best_cluster = None
+    best_score = 0
+    
+    for cluster in clusters:
+        total_length = 0
+        for line in cluster:
+            x1, y1, x2, y2 = line
+            length = np.sqrt((x2 - x1)**2 + (y2 - y1)**2)
+            total_length += length
+        
+        score = total_length * len(cluster)
+        
+        if score > best_score:
+            best_score = score
+            best_cluster = cluster
+    
+    return best_cluster
+
+
+def fit_lane_line(cluster, image_shape):
+    if not cluster:
+        return None, None
+    
+    height = image_shape[0]
+    
+    x_coords = []
+    y_coords = []
+    
+    for line in cluster:
+        x1, y1, x2, y2 = line
+        x_coords.extend([x1, x2])
+        y_coords.extend([y1, y2])
+    
+    if len(x_coords) < 2:
+        return None, None
+    
+    try:
+        poly_coeffs = np.polyfit(x_coords, y_coords, 1)
+    except:
+        return None, None
+    
+    slope = poly_coeffs[0]
+    intercept = poly_coeffs[1]
+    
+    y1 = height
+    y2 = int(height * 0.58)
+    
+    if abs(slope) < 0.1:
+        return None, None
+    
+    x1 = int((y1 - intercept) / slope)
+    x2 = int((y2 - intercept) / slope)
+    
+    if x1 < 0 or x1 > image_shape[1] or x2 < 0 or x2 > image_shape[1]:
+        return None, None
+    
+    return (x1, y1, x2, y2), slope
+
+
+def check_lines_cross(left_line, right_line):
+    if left_line is None or right_line is None:
+        return False
+    
+    x1_l, y1_l, x2_l, y2_l = left_line
+    x1_r, y1_r, x2_r, y2_r = right_line
+    
+    if x2_l == x1_l or x2_r == x1_r:
+        return False
+    
+    slope_l = (y2_l - y1_l) / (x2_l - x1_l)
+    slope_r = (y2_r - y1_r) / (x2_r - x1_r)
+    
+    intercept_l = y1_l - slope_l * x1_l
+    intercept_r = y1_r - slope_r * x1_r
+    
+    if abs(slope_l - slope_r) < 0.01:
+        return False
+    
+    x_cross = (intercept_r - intercept_l) / (slope_l - slope_r)
+    y_cross = slope_l * x_cross + intercept_l
+    
+    min_y = min(y1_l, y2_l, y1_r, y2_r)
+    max_y = max(y1_l, y2_l, y1_r, y2_r)
+    
+    if min_y < y_cross < max_y:
+        return True
+    
+    return False
+
+
+def smooth_lane_line(current_line, prev_line, alpha=0.4):
+    if current_line is None and prev_line is None:
+        return None
+    if current_line is None:
+        return prev_line
+    if prev_line is None:
+        return current_line
+    
+    x1 = int(alpha * current_line[0] + (1 - alpha) * prev_line[0])
+    y1 = int(alpha * current_line[1] + (1 - alpha) * prev_line[1])
+    x2 = int(alpha * current_line[2] + (1 - alpha) * prev_line[2])
+    y2 = int(alpha * current_line[3] + (1 - alpha) * prev_line[3])
+    
+    return (x1, y1, x2, y2)
+
+
+def draw_lane_lines(image, left_line, right_line, thickness=8):
+    output = np.copy(image)
+
+    if left_line is not None:
+        x1, y1, x2, y2 = left_line
+        cv2.line(output, (x1, y1), (x2, y2), (0, 255, 0), thickness)
+
+    if right_line is not None:
+        x1, y1, x2, y2 = right_line
+        cv2.line(output, (x1, y1), (x2, y2), (0, 255, 0), thickness)
+
+    return output
+
+
+def detect_lane_lines(image, prev_left_slope=None, prev_right_slope=None):
+    global prev_left_line, prev_right_line
+    
+    height, width = image.shape[:2]
+
+    enhanced = enhance_image(image)
+
+    color_filtered = select_white_yellow_colors_hsl(enhanced)
+
+    edges = canny_edge_detection(color_filtered)
+
+    left_mask, right_mask = create_left_right_roi(image.shape)
+    left_edges = apply_roi(edges, left_mask)
+    right_edges = apply_roi(edges, right_mask)
+
+    left_lines = hough_lines(left_edges)
+    right_lines = hough_lines(right_edges)
+
+    left_clusters = cluster_lines_by_slope_position(left_lines, image.shape, 'left')
+    right_clusters = cluster_lines_by_slope_position(right_lines, image.shape, 'right')
+
+    best_left_cluster = select_best_cluster(left_clusters)
+    best_right_cluster = select_best_cluster(right_clusters)
+
+    left_lane, left_slope = fit_lane_line(best_left_cluster, image.shape)
+    right_lane, right_slope = fit_lane_line(best_right_cluster, image.shape)
+
+    if check_lines_cross(left_lane, right_lane):
+        left_lane = None
+        right_lane = None
+
+    left_lane = smooth_lane_line(left_lane, prev_left_line)
+    right_lane = smooth_lane_line(right_lane, prev_right_line)
+    
+    prev_left_line = left_lane
+    prev_right_line = right_lane
+
+    result = draw_lane_lines(image, left_lane, right_lane)
+
+    return result, left_slope, right_slope
+
+
+def process_image(image_path, output_path=None):
+    image = cv2.imread(image_path)
+
+    if image is None:
+        print(f"无法读取图片: {image_path}")
+        return
+
+    result, _, _ = detect_lane_lines(image)
+
+    if output_path:
+        cv2.imwrite(output_path, result)
+        print(f"处理后的图片已保存至: {output_path}")
+
+    plt.figure(figsize=(12, 8))
+    plt.imshow(cv2.cvtColor(result, cv2.COLOR_BGR2RGB))
+    plt.title('车道线检测结果')
+    plt.axis('off')
+    plt.show()
+
+
+def show_detection_steps(image_path):
+    image = cv2.imread(image_path)
+
+    if image is None:
+        print(f"无法读取图片: {image_path}")
+        return
+
+    height, width = image.shape[:2]
+
+    fig, axes = plt.subplots(2, 3, figsize=(15, 10))
+    fig.suptitle('车道线检测步骤展示', fontsize=16)
+
+    axes[0, 0].imshow(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
+    axes[0, 0].set_title('原图')
+    axes[0, 0].axis('off')
+
+    enhanced = enhance_image(image)
+    axes[0, 1].imshow(cv2.cvtColor(enhanced, cv2.COLOR_BGR2RGB))
+    axes[0, 1].set_title('CLAHE增强')
+    axes[0, 1].axis('off')
+
+    hsl_result = select_white_yellow_colors_hsl(enhanced)
+    axes[0, 2].imshow(cv2.cvtColor(hsl_result, cv2.COLOR_BGR2RGB))
+    axes[0, 2].set_title('HSL颜色过滤')
+    axes[0, 2].axis('off')
+
+    edges = canny_edge_detection(hsl_result)
+    axes[1, 0].imshow(edges, cmap='gray')
+    axes[1, 0].set_title('Canny边缘检测')
+    axes[1, 0].axis('off')
+
+    left_mask, right_mask = create_left_right_roi(image.shape)
+    combined_mask = cv2.bitwise_or(left_mask, right_mask)
+    roi_visual = cv2.cvtColor(combined_mask, cv2.COLOR_GRAY2BGR)
+    axes[1, 1].imshow(cv2.cvtColor(roi_visual, cv2.COLOR_BGR2RGB))
+    axes[1, 1].set_title('左右分离ROI')
+    axes[1, 1].axis('off')
+
+    result, _, _ = detect_lane_lines(image)
+    axes[1, 2].imshow(cv2.cvtColor(result, cv2.COLOR_BGR2RGB))
+    axes[1, 2].set_title('最终车道线检测结果')
+    axes[1, 2].axis('off')
+
+    plt.tight_layout()
+    plt.show()
+
+
+def cv_imread(file_path):
+    cv_img = cv2.imdecode(np.fromfile(file_path, dtype=np.uint8), -1)
+    return cv_img
+
+
+def cv_imwrite(file_path, img):
+    ext = os.path.splitext(file_path)[1]
+    cv2.imencode(ext, img)[1].tofile(file_path)
+
+
+def process_all_test_images():
+    global prev_left_line, prev_right_line
+    
+    if not os.path.exists(TEST_IMAGES_DIR):
+        print(f"测试图片目录不存在: {TEST_IMAGES_DIR}")
+        return
+
+    if not os.path.exists(TEST_OUTPUT_DIR):
+        os.makedirs(TEST_OUTPUT_DIR)
+        print(f"创建输出目录: {TEST_OUTPUT_DIR}")
+
+    image_extensions = ('.jpg', '.jpeg', '.png', '.bmp', '.tiff')
+    image_files = [f for f in os.listdir(TEST_IMAGES_DIR) if f.lower().endswith(image_extensions)]
+
+    if not image_files:
+        print(f"测试图片目录中没有找到图片文件: {TEST_IMAGES_DIR}")
+        return
+
+    print(f"找到 {len(image_files)} 个图片文件，开始处理...")
+
+    for filename in image_files:
+        prev_left_line = None
+        prev_right_line = None
+        
+        image_path = os.path.join(TEST_IMAGES_DIR, filename)
+        output_path = os.path.join(TEST_OUTPUT_DIR, f"result_{filename}")
+
+        image = cv_imread(image_path)
+        if image is None:
+            print(f"无法读取图片: {image_path}")
+            continue
+
+        result, _, _ = detect_lane_lines(image)
+        cv_imwrite(output_path, result)
+        print(f"已处理: {filename} -> {os.path.basename(output_path)}")
+
+    print("所有图片处理完成!")
+
+
+if __name__ == "__main__":
+    import sys
+
+    if len(sys.argv) > 1:
+        if sys.argv[1] == "--batch":
+            process_all_test_images()
+        else:
+            image_path = sys.argv[1]
+            output_path = sys.argv[2] if len(sys.argv) > 2 else None
+
+            if "--steps" in sys.argv:
+                show_detection_steps(image_path)
+            else:
+                process_image(image_path, output_path)
+    else:
+        print("使用方法:")
+        print("  python lane_detection.py <图片路径> [输出路径]")
+        print("  python lane_detection.py <图片路径> --steps")
+        print("  python lane_detection.py --batch")
+        print("\n示例:")
+        print("  python lane_detection.py test.jpg")
+        print("  python lane_detection.py test.jpg output.jpg")
+        print("  python lane_detection.py test.jpg --steps")
+        print("  python lane_detection.py --batch")
