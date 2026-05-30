@@ -43,6 +43,9 @@ class LaneDetectionGUI:
         self.current_video_path: Optional[str] = None
         self.video_running: bool = False
         self.video_cap: Optional[cv2.VideoCapture] = None
+        self.video_writer: Optional[cv2.VideoWriter] = None
+        self.video_output_path: Optional[str] = None
+        self.video_frame_count: int = 0
         
         self.tk_original_image: Optional[ImageTk.PhotoImage] = None
         self.tk_processed_image: Optional[ImageTk.PhotoImage] = None
@@ -225,8 +228,6 @@ class LaneDetectionGUI:
         
         if file_path:
             self.current_video_path = file_path
-            self.original_image = None
-            self.processed_image = None
             
             cap = cv2.VideoCapture(file_path)
             if cap.isOpened():
@@ -234,13 +235,24 @@ class LaneDetectionGUI:
                 height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
                 fps = cap.get(cv2.CAP_PROP_FPS)
                 frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+                
+                ret, first_frame = cap.read()
                 cap.release()
                 
+                if ret and first_frame is not None:
+                    self.original_image = first_frame.copy()
+                    self.processed_image = None
+                    self._display_original_image()
+                    self._show_placeholder(self.processed_canvas, "点击\"开始视频\"开始播放")
+                else:
+                    self.original_image = None
+                    self.processed_image = None
+                    self._show_placeholder(self.original_canvas, "无法读取视频帧")
+                    self._show_placeholder(self.processed_canvas, "等待处理...")
+                
                 self.original_title.config(text=f"{os.path.basename(file_path)} ({width}x{height}, {fps:.1f}fps)")
-                self.processed_title.config(text=f"共 {frame_count} 帧")
-                self._show_placeholder(self.original_canvas, "点击\"开始视频\"开始播放")
-                self._show_placeholder(self.processed_canvas, "等待处理...")
-                self.status_var.set(f"已选择视频: {os.path.basename(file_path)}")
+                self.processed_title.config(text=f"共 {frame_count} 帧 - 已暂停")
+                self.status_var.set(f"已选择视频: {os.path.basename(file_path)} (首帧已显示)")
             else:
                 messagebox.showerror("错误", "无法打开视频文件")
     
@@ -301,6 +313,36 @@ class LaneDetectionGUI:
         self.video_cap = cv2.VideoCapture(self.current_video_path)
         self.detector.reset()
         
+        script_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        result_dir = os.path.join(script_dir, "结果")
+        try:
+            if not os.path.exists(result_dir):
+                os.makedirs(result_dir, exist_ok=True)
+        except Exception:
+            pass
+        
+        width = int(self.video_cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(self.video_cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        fps = self.video_cap.get(cv2.CAP_PROP_FPS)
+        if fps <= 0:
+            fps = 25.0
+        
+        from datetime import datetime
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        base_name = os.path.splitext(os.path.basename(self.current_video_path))[0]
+        video_filename = f"result_{timestamp}_{base_name}.avi"
+        self.video_output_path = os.path.join(result_dir, video_filename)
+        
+        fourcc = cv2.VideoWriter_fourcc(*'XVID')
+        self.video_writer = cv2.VideoWriter(self.video_output_path, fourcc, fps, (width, height))
+        
+        if not self.video_writer.isOpened():
+            self.logger.error("无法创建视频写入器")
+            self.video_writer = None
+            self.video_output_path = None
+        
+        self.video_frame_count = 0
+        
         self.status_var.set("视频处理中...")
         self.processed_title.config(text="实时处理中...")
         
@@ -339,6 +381,13 @@ class LaneDetectionGUI:
             
             self.processed_image = output
             
+            if self.video_writer is not None:
+                try:
+                    self.video_writer.write(output)
+                    self.video_frame_count += 1
+                except Exception as e:
+                    self.logger.error(f"写入视频帧失败: {e}")
+            
             self.frame_count += 1
             if self.frame_count % 5 == 0:
                 elapsed = time.time() - self.start_time
@@ -370,36 +419,87 @@ class LaneDetectionGUI:
         if self.video_cap is not None:
             self.video_cap.release()
             self.video_cap = None
-        self.status_var.set("已停止")
-        self.processed_title.config(text="已停止")
+        
+        saved_info = ""
+        if self.video_writer is not None:
+            self.video_writer.release()
+            self.video_writer = None
+            
+            if self.video_output_path and os.path.exists(self.video_output_path):
+                file_size_mb = os.path.getsize(self.video_output_path) / (1024 * 1024)
+                saved_info = f" | 视频已保存: {os.path.basename(self.video_output_path)} ({file_size_mb:.2f} MB, {self.video_frame_count} 帧)"
+                self.logger.info(f"视频已保存: {self.video_output_path} ({file_size_mb:.2f} MB, {self.video_frame_count} 帧)")
+            self.video_output_path = None
+        
+        self.status_var.set(f"已停止{saved_info}")
+        self.processed_title.config(text=f"已停止 | 已录制 {self.video_frame_count} 帧")
     
     def _reset_detector(self):
-        """重置检测器"""
+        """重置检测器及全部状态"""
+        if self.video_running:
+            self._stop_video()
+        
         self.detector.reset()
+        self.preprocessor = Preprocessor()
+        self.detector = LaneDetector()
+        
+        self.original_image = None
+        self.processed_image = None
+        self.current_video_path = None
+        self.video_output_path = None
+        self.video_frame_count = 0
+        
+        self.tk_original_image = None
+        self.tk_processed_image = None
+        
+        self._show_placeholder(self.original_canvas, "请打开图像或视频文件")
+        self._show_placeholder(self.processed_canvas, "等待处理...")
+        
+        self.original_title.config(text="等待加载...")
+        self.processed_title.config(text="等待处理...")
         self.left_status_var.set("左车道线: 未检测")
         self.right_status_var.set("右车道线: 未检测")
         self.fps_status_var.set("FPS: --")
-        self.status_var.set("检测器已重置")
+        self.status_var.set("已重置")
     
     def _save_result(self):
-        """保存结果"""
+        """保存结果到结果文件夹"""
+        if self.current_video_path and self.video_output_path and os.path.exists(self.video_output_path):
+            messagebox.showinfo("提示", f"视频已自动保存到:\n{self.video_output_path}\n\n共 {self.video_frame_count} 帧")
+            return
+        
         if self.processed_image is None:
             messagebox.showwarning("警告", "没有可保存的结果")
             return
         
-        file_path = filedialog.asksaveasfilename(
-            title="保存结果",
-            defaultextension=".jpg",
-            filetypes=[("JPEG", "*.jpg"), ("PNG", "*.png"), ("所有文件", "*.*")]
-        )
+        script_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        result_dir = os.path.join(script_dir, "结果")
         
-        if file_path:
-            try:
-                ext = os.path.splitext(file_path)[1]
-                cv2.imencode(ext, self.processed_image)[1].tofile(file_path)
-                self.status_var.set(f"已保存: {os.path.basename(file_path)}")
-            except Exception as e:
-                messagebox.showerror("错误", f"保存失败: {e}")
+        try:
+            if not os.path.exists(result_dir):
+                os.makedirs(result_dir, exist_ok=True)
+                self.logger.info(f"创建结果目录: {result_dir}")
+        except PermissionError:
+            messagebox.showerror("错误", f"权限不足，无法创建结果目录: {result_dir}")
+            return
+        except OSError as e:
+            messagebox.showerror("错误", f"创建结果目录失败: {e}")
+            return
+        
+        from datetime import datetime
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"result_{timestamp}.jpg"
+        
+        file_path = os.path.join(result_dir, filename)
+        
+        try:
+            cv2.imencode('.jpg', self.processed_image)[1].tofile(file_path)
+            file_size_kb = os.path.getsize(file_path) / 1024
+            self.status_var.set(f"已保存: {filename} ({file_size_kb:.1f} KB) -> {result_dir}")
+            self.logger.info(f"结果已保存: {file_path} ({file_size_kb:.1f} KB)")
+        except Exception as e:
+            messagebox.showerror("错误", f"保存失败: {e}")
+            self.logger.error(f"保存结果失败: {e}")
     
     def _display_original_image(self):
         """显示原始图像"""
@@ -475,7 +575,11 @@ class LaneDetectionGUI:
 
 def main():
     """启动GUI"""
-    log_file = os.path.join(os.path.dirname(__file__), "..", "logs", "gui.log")
+    script_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    log_dir = os.path.join(script_dir, "logs")
+    if not os.path.exists(log_dir):
+        os.makedirs(log_dir, exist_ok=True)
+    log_file = os.path.join(log_dir, "gui.log")
     setup_logger(
         name="lane_detection",
         level="INFO",

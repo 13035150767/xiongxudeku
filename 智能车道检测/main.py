@@ -14,6 +14,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from config.settings import Config, get_config, reset_config
 from utils.logger import setup_logger, get_logger, DetectionLogger, PerformanceLogger
 from utils.visualization import Visualizer
+from utils.deduplicator import BatchDeduplicator, DedupStrategy
 from handlers.input_handler import ImageReader, VideoReader
 from handlers.output_handler import ImageWriter, VideoWriter, DataWriter
 from core.preprocessor import Preprocessor
@@ -219,18 +220,26 @@ class LaneDetectionPipeline:
         
         reader = ImageReader()
         writer = ImageWriter(output_dir)
+        dedup = BatchDeduplicator(strategy=DedupStrategy.FILENAME)
         
         files = reader.get_image_files(input_dir)
         
         if not files:
             self.logger.warning(f"未找到图像文件: {input_dir}")
-            return {'total': 0, 'success': 0, 'failed': 0}
+            return {'total': 0, 'success': 0, 'failed': 0, 'skipped': 0}
         
         self.detection_logger.reset()
         success_count = 0
         failed_count = 0
+        skipped_count = 0
         
         for filename in files:
+            should_process, _ = dedup.should_process_file(filename)
+            if not should_process:
+                skipped_count += 1
+                self.logger.info(f"跳过重复文件: {filename}")
+                continue
+            
             input_path = os.path.join(input_dir, filename)
             image = reader.read(input_path)
             
@@ -240,17 +249,20 @@ class LaneDetectionPipeline:
             
             self.detector.reset()
             output, result = self.process_image(image)
-            writer.write(output, filename)
+            writer.write(output, filename, detection_result=result)
             
             success_count += 1
             print(f"\r已处理: {success_count}/{len(files)}", end="")
         
         print()
         
+        dedup.log_stats()
+        
         stats = {
             'total': len(files),
             'success': success_count,
-            'failed': failed_count
+            'failed': failed_count,
+            'skipped': skipped_count
         }
         
         self.logger.info(f"批量处理完成: {stats}")
@@ -276,28 +288,43 @@ class LaneDetectionPipeline:
         self.logger.info(f"批量处理视频: {input_dir}")
         
         reader = VideoReader()
+        dedup = BatchDeduplicator(strategy=DedupStrategy.FILENAME)
         files = reader.get_video_files(input_dir)
         
         if not files:
             self.logger.warning(f"未找到视频文件: {input_dir}")
-            return {'total': 0, 'success': 0, 'failed': 0}
+            return {'total': 0, 'success': 0, 'failed': 0, 'skipped': 0}
         
         success_count = 0
         failed_count = 0
+        skipped_count = 0
         
         for filename in files:
+            should_process, _ = dedup.should_process_file(filename)
+            if not should_process:
+                skipped_count += 1
+                self.logger.info(f"跳过重复文件: {filename}")
+                continue
+            
             input_path = os.path.join(input_dir, filename)
             output_path = os.path.join(output_dir, f"result_{filename}")
+            
+            if dedup.is_output_duplicate(output_path):
+                skipped_count += 1
+                continue
             
             if self.process_video_file(input_path, output_path):
                 success_count += 1
             else:
                 failed_count += 1
         
+        dedup.log_stats()
+        
         stats = {
             'total': len(files),
             'success': success_count,
-            'failed': failed_count
+            'failed': failed_count,
+            'skipped': skipped_count
         }
         
         self.logger.info(f"批量处理完成: {stats}")
@@ -315,6 +342,7 @@ def parse_args() -> argparse.Namespace:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 示例:
+  python main.py --gui
   python main.py --image test.jpg
   python main.py --image test.jpg --output result.jpg
   python main.py --video test.mp4
@@ -325,6 +353,7 @@ def parse_args() -> argparse.Namespace:
     )
     
     parser.add_argument('--config', type=str, help='配置文件路径')
+    parser.add_argument('--gui', action='store_true', help='启动图形界面')
     parser.add_argument('--image', type=str, help='输入图像路径')
     parser.add_argument('--video', type=str, help='输入视频路径')
     parser.add_argument('--output', type=str, help='输出路径')
@@ -345,6 +374,21 @@ def main():
     reset_config()
     config = get_config(args=args)
     config.log.level = args.log_level
+    
+    if args.gui or (not args.image and not args.video and not args.batch_images and not args.batch_videos):
+        try:
+            from ui.gui import LaneDetectionGUI
+            app = LaneDetectionGUI(config)
+            app.run()
+        except ImportError as e:
+            print(f"✗ 无法加载图形界面模块: {e}")
+            print("  请确认 tkinter 和 Pillow 已正确安装")
+            print("  安装命令: pip install Pillow")
+        except Exception as e:
+            print(f"✗ 启动图形界面失败: {e}")
+            import traceback
+            traceback.print_exc()
+        return
     
     pipeline = LaneDetectionPipeline(config)
     
@@ -372,10 +416,6 @@ def main():
             input_dir = args.input_dir or config.path.test_videos_dir
             output_dir = args.output_dir or config.path.output_dir
             pipeline.batch_process_videos(input_dir, output_dir)
-        
-        else:
-            print("请指定输入文件或使用批量处理模式")
-            print("使用 --help 查看帮助信息")
     
     except KeyboardInterrupt:
         print("\n用户中断")

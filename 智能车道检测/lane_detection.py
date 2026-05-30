@@ -2,12 +2,72 @@ import cv2
 import numpy as np
 import matplotlib.pyplot as plt
 import os
+import sys
+from datetime import datetime
+import logging
+import traceback
 
-TEST_IMAGES_DIR = r"E:\PythonProject\计算机视觉\智能车道检测\test_images"
-TEST_OUTPUT_DIR = r"E:\PythonProject\计算机视觉\智能车道检测\结果"
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, SCRIPT_DIR)
+from utils.deduplicator import BatchDeduplicator, DedupStrategy
+TEST_IMAGES_DIR = os.path.join(SCRIPT_DIR, "test_images")
+TEST_VIDEOS_DIR = os.path.join(SCRIPT_DIR, "test_videos")
+RESULT_DIR = os.path.join(SCRIPT_DIR, "结果")
+
+detection_counter = 0
 
 prev_left_line = None
 prev_right_line = None
+
+def setup_logging():
+    log_format = '%(asctime)s - %(levelname)s - %(message)s'
+    logging.basicConfig(
+        level=logging.INFO,
+        format=log_format,
+        handlers=[
+            logging.StreamHandler(sys.stdout)
+        ]
+    )
+    return logging.getLogger(__name__)
+
+logger = setup_logging()
+
+def ensure_result_directory():
+    try:
+        if not os.path.exists(RESULT_DIR):
+            os.makedirs(RESULT_DIR)
+            logger.info(f"✓ 创建结果目录成功: {RESULT_DIR}")
+        else:
+            logger.info(f"✓ 结果目录已存在: {RESULT_DIR}")
+        return True
+    except PermissionError as e:
+        logger.error(f"✗ 权限不足，无法创建结果目录: {RESULT_DIR}")
+        logger.error(f"  错误详情: {str(e)}")
+        return False
+    except OSError as e:
+        logger.error(f"✗ 创建结果目录失败: {RESULT_DIR}")
+        logger.error(f"  错误详情: {str(e)}")
+        return False
+
+def generate_output_filename(original_filename, prefix="result", include_timestamp=True, include_counter=True):
+    global detection_counter
+    
+    name, ext = os.path.splitext(original_filename)
+    
+    parts = [prefix]
+    
+    if include_timestamp:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        parts.append(timestamp)
+    
+    if include_counter:
+        detection_counter += 1
+        parts.append(f"ID{detection_counter:04d}")
+    
+    parts.append(name)
+    
+    new_filename = "_".join(parts) + ext
+    return new_filename
 
 
 def enhance_image(image):
@@ -330,24 +390,53 @@ def detect_lane_lines(image, prev_left_slope=None, prev_right_slope=None):
     return result, left_slope, right_slope
 
 
-def process_image(image_path, output_path=None):
-    image = cv2.imread(image_path)
-
-    if image is None:
-        print(f"无法读取图片: {image_path}")
-        return
-
-    result, _, _ = detect_lane_lines(image)
-
-    if output_path:
-        cv2.imwrite(output_path, result)
-        print(f"处理后的图片已保存至: {output_path}")
-
-    plt.figure(figsize=(12, 8))
-    plt.imshow(cv2.cvtColor(result, cv2.COLOR_BGR2RGB))
-    plt.title('车道线检测结果')
-    plt.axis('off')
-    plt.show()
+def process_image(image_path, output_path=None, auto_save=True):
+    logger.info("=" * 60)
+    logger.info(f"开始处理图片: {image_path}")
+    
+    try:
+        if not os.path.exists(image_path):
+            logger.error(f"✗ 图片文件不存在: {image_path}")
+            return False
+        
+        image = cv2.imread(image_path)
+        if image is None:
+            logger.error(f"✗ 无法读取图片: {image_path}")
+            return False
+        
+        logger.info(f"✓ 图片加载成功，尺寸: {image.shape[1]}x{image.shape[0]}")
+        
+        result, left_slope, right_slope = detect_lane_lines(image)
+        
+        if auto_save and output_path is None:
+            if not ensure_result_directory():
+                logger.error("✗ 无法创建结果目录，保存失败")
+                return False
+            
+            original_filename = os.path.basename(image_path)
+            output_filename = generate_output_filename(original_filename)
+            output_path = os.path.join(RESULT_DIR, output_filename)
+        
+        if output_path:
+            success = save_result_image(result, output_path, f"车道线检测结果 - {os.path.basename(image_path)}")
+            if not success:
+                return False
+        
+        logger.info(f"✓ 检测完成 - 左车道斜率: {left_slope:.4f if left_slope else 'N/A'}, 右车道斜率: {right_slope:.4f if right_slope else 'N/A'}")
+        
+        plt.figure(figsize=(12, 8))
+        plt.imshow(cv2.cvtColor(result, cv2.COLOR_BGR2RGB))
+        plt.title('车道线检测结果')
+        plt.axis('off')
+        plt.show()
+        
+        return True
+        
+    except Exception as e:
+        logger.error(f"✗ 处理图片时发生错误: {image_path}")
+        logger.error(f"  错误详情: {str(e)}")
+        logger.error(f"  堆栈跟踪:\n{traceback.format_exc()}")
+        return False
 
 
 def show_detection_steps(image_path):
@@ -397,10 +486,46 @@ def show_detection_steps(image_path):
     plt.show()
 
 
-def cv_imread(file_path):
-    cv_img = cv2.imdecode(np.fromfile(file_path, dtype=np.uint8), -1)
-    return cv_img
+def save_result_image(image, output_path, filename_description=""):
+    try:
+        ext = os.path.splitext(output_path)[1]
+        success = cv2.imencode(ext, image)[1].tofile(output_path)
+        
+        if os.path.exists(output_path):
+            file_size = os.path.getsize(output_path)
+            logger.info(f"✓ 保存成功: {output_path}")
+            logger.info(f"  文件大小: {file_size / 1024:.2f} KB")
+            if filename_description:
+                logger.info(f"  描述: {filename_description}")
+            return True
+        else:
+            logger.error(f"✗ 保存失败: 文件未创建 - {output_path}")
+            return False
+            
+    except PermissionError as e:
+        logger.error(f"✗ 权限不足，无法保存文件: {output_path}")
+        logger.error(f"  错误详情: {str(e)}")
+        return False
+    except cv2.error as e:
+        logger.error(f"✗ OpenCV编码错误，无法保存文件: {output_path}")
+        logger.error(f"  错误详情: {str(e)}")
+        return False
+    except Exception as e:
+        logger.error(f"✗ 保存文件时发生未知错误: {output_path}")
+        logger.error(f"  错误详情: {str(e)}")
+        logger.error(f"  堆栈跟踪:\n{traceback.format_exc()}")
+        return False
 
+def cv_imread(file_path):
+    try:
+        cv_img = cv2.imdecode(np.fromfile(file_path, dtype=np.uint8), -1)
+        if cv_img is None:
+            logger.error(f"✗ 无法解码图片文件: {file_path}")
+        return cv_img
+    except Exception as e:
+        logger.error(f"✗ 读取图片文件失败: {file_path}")
+        logger.error(f"  错误详情: {str(e)}")
+        return None
 
 def cv_imwrite(file_path, img):
     ext = os.path.splitext(file_path)[1]
@@ -408,47 +533,116 @@ def cv_imwrite(file_path, img):
 
 
 def process_all_test_images():
-    global prev_left_line, prev_right_line
+    global prev_left_line, prev_right_line, detection_counter
+    
+    logger.info("=" * 60)
+    logger.info("开始批量处理测试图片")
+    logger.info(f"脚本目录: {SCRIPT_DIR}")
+    logger.info(f"测试图片目录: {TEST_IMAGES_DIR}")
+    logger.info(f"结果保存目录: {RESULT_DIR}")
     
     if not os.path.exists(TEST_IMAGES_DIR):
-        print(f"测试图片目录不存在: {TEST_IMAGES_DIR}")
-        return
-
-    if not os.path.exists(TEST_OUTPUT_DIR):
-        os.makedirs(TEST_OUTPUT_DIR)
-        print(f"创建输出目录: {TEST_OUTPUT_DIR}")
-
-    image_extensions = ('.jpg', '.jpeg', '.png', '.bmp', '.tiff')
-    image_files = [f for f in os.listdir(TEST_IMAGES_DIR) if f.lower().endswith(image_extensions)]
-
+        logger.error(f"✗ 测试图片目录不存在: {TEST_IMAGES_DIR}")
+        logger.info("  请创建test_images目录并放入测试图片")
+        return False
+    
+    if not ensure_result_directory():
+        logger.error("✗ 无法创建结果目录，批量处理终止")
+        return False
+    
+    image_extensions = ('.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.tif')
+    try:
+        all_files = os.listdir(TEST_IMAGES_DIR)
+        image_files = [f for f in all_files if f.lower().endswith(image_extensions)]
+    except PermissionError as e:
+        logger.error(f"✗ 权限不足，无法访问测试图片目录: {TEST_IMAGES_DIR}")
+        logger.error(f"  错误详情: {str(e)}")
+        return False
+    except Exception as e:
+        logger.error(f"✗ 读取测试图片目录失败: {TEST_IMAGES_DIR}")
+        logger.error(f"  错误详情: {str(e)}")
+        return False
+    
     if not image_files:
-        print(f"测试图片目录中没有找到图片文件: {TEST_IMAGES_DIR}")
-        return
-
-    print(f"找到 {len(image_files)} 个图片文件，开始处理...")
-
-    for filename in image_files:
+        logger.warning(f"⚠ 测试图片目录中没有找到图片文件: {TEST_IMAGES_DIR}")
+        logger.info(f"  支持的图片格式: {', '.join(image_extensions)}")
+        return False
+    
+    logger.info(f"✓ 找到 {len(image_files)} 个图片文件")
+    logger.info("-" * 60)
+    
+    dedup = BatchDeduplicator(strategy=DedupStrategy.FILENAME)
+    
+    detection_counter = 0
+    success_count = 0
+    fail_count = 0
+    skipped_count = 0
+    
+    for idx, filename in enumerate(image_files, 1):
         prev_left_line = None
         prev_right_line = None
         
-        image_path = os.path.join(TEST_IMAGES_DIR, filename)
-        output_path = os.path.join(TEST_OUTPUT_DIR, f"result_{filename}")
-
-        image = cv_imread(image_path)
-        if image is None:
-            print(f"无法读取图片: {image_path}")
+        logger.info(f"\n[{idx}/{len(image_files)}] 处理文件: {filename}")
+        
+        should_process, _ = dedup.should_process_file(filename)
+        if not should_process:
+            skipped_count += 1
+            logger.info(f"  ⚠ 跳过重复文件: {filename}")
             continue
-
-        result, _, _ = detect_lane_lines(image)
-        cv_imwrite(output_path, result)
-        print(f"已处理: {filename} -> {os.path.basename(output_path)}")
-
-    print("所有图片处理完成!")
+        
+        image_path = os.path.join(TEST_IMAGES_DIR, filename)
+        
+        try:
+            image = cv_imread(image_path)
+            if image is None:
+                logger.error(f"  ✗ 跳过: 无法读取图片")
+                fail_count += 1
+                continue
+            
+            logger.info(f"  ✓ 图片尺寸: {image.shape[1]}x{image.shape[0]}")
+            
+            result, left_slope, right_slope = detect_lane_lines(image)
+            
+            output_filename = generate_output_filename(filename)
+            output_path = os.path.join(RESULT_DIR, output_filename)
+            
+            if dedup.is_output_duplicate(output_path):
+                skipped_count += 1
+                continue
+            
+            success = save_result_image(result, output_path, f"批量处理 - {filename}")
+            
+            if success:
+                success_count += 1
+                logger.info(f"  ✓ 进度: 成功 {success_count}/{len(image_files)}")
+            else:
+                fail_count += 1
+                logger.error(f"  ✗ 进度: 失败 {fail_count}/{len(image_files)}")
+                
+        except Exception as e:
+            fail_count += 1
+            logger.error(f"  ✗ 处理失败: {str(e)}")
+            logger.error(f"  堆栈跟踪:\n{traceback.format_exc()}")
+    
+    dedup.log_stats()
+    
+    logger.info("\n" + "=" * 60)
+    logger.info("批量处理完成!")
+    logger.info(f"  总计: {len(image_files)} 个文件")
+    logger.info(f"  成功: {success_count} 个")
+    logger.info(f"  失败: {fail_count} 个")
+    logger.info(f"  跳过(重复): {skipped_count} 个")
+    logger.info(f"  结果保存位置: {RESULT_DIR}")
+    logger.info("=" * 60)
+    
+    return True
 
 
 if __name__ == "__main__":
-    import sys
-
+    logger.info("=" * 60)
+    logger.info("智能车道检测系统")
+    logger.info("=" * 60)
+    
     if len(sys.argv) > 1:
         if sys.argv[1] == "--batch":
             process_all_test_images()
@@ -459,14 +653,30 @@ if __name__ == "__main__":
             if "--steps" in sys.argv:
                 show_detection_steps(image_path)
             else:
-                process_image(image_path, output_path)
+                auto_save = "--no-save" not in sys.argv
+                process_image(image_path, output_path, auto_save=auto_save)
     else:
-        print("使用方法:")
-        print("  python lane_detection.py <图片路径> [输出路径]")
-        print("  python lane_detection.py <图片路径> --steps")
-        print("  python lane_detection.py --batch")
-        print("\n示例:")
-        print("  python lane_detection.py test.jpg")
-        print("  python lane_detection.py test.jpg output.jpg")
-        print("  python lane_detection.py test.jpg --steps")
-        print("  python lane_detection.py --batch")
+        logger.info("\n使用方法:")
+        logger.info("  python lane_detection.py <图片路径> [输出路径]")
+        logger.info("  python lane_detection.py <图片路径> --steps")
+        logger.info("  python lane_detection.py <图片路径> --no-save")
+        logger.info("  python lane_detection.py --batch")
+        logger.info("\n参数说明:")
+        logger.info("  <图片路径>    输入图片的路径")
+        logger.info("  [输出路径]    可选，指定输出路径（默认自动保存到结果目录）")
+        logger.info("  --steps      显示检测步骤的可视化")
+        logger.info("  --no-save    不自动保存结果")
+        logger.info("  --batch      批量处理test_images目录下的所有图片")
+        logger.info("\n示例:")
+        logger.info("  python lane_detection.py test.jpg")
+        logger.info("  python lane_detection.py test.jpg output.jpg")
+        logger.info("  python lane_detection.py test.jpg --steps")
+        logger.info("  python lane_detection.py --batch")
+        logger.info("\n目录结构:")
+        logger.info(f"  脚本目录:     {SCRIPT_DIR}")
+        logger.info(f"  测试图片目录: {TEST_IMAGES_DIR}")
+        logger.info(f"  结果保存目录: {RESULT_DIR}")
+        logger.info("\n输出文件命名规则:")
+        logger.info("  result_<时间戳>_ID<序号>_<原文件名>.<扩展名>")
+        logger.info("  例如: result_20260530_143025_ID0001_test.jpg")
+        logger.info("=" * 60)

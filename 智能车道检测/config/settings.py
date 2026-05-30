@@ -10,6 +10,8 @@ from dataclasses import dataclass, field
 from typing import Optional, Dict, Any, List
 from pathlib import Path
 
+_SCRIPT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
 
 @dataclass
 class ColorThresholdConfig:
@@ -72,10 +74,10 @@ class PerformanceConfig:
 @dataclass
 class PathConfig:
     """路径配置"""
-    test_images_dir: str = r"E:\PythonProject\计算机视觉\智能车道检测\test_images"
-    test_videos_dir: str = r"E:\PythonProject\计算机视觉\智能车道检测\test_videos"
-    output_dir: str = r"E:\PythonProject\计算机视觉\智能车道检测\结果"
-    log_dir: str = r"E:\PythonProject\计算机视觉\智能车道检测\logs"
+    test_images_dir: str = field(default_factory=lambda: os.path.join(_SCRIPT_DIR, "test_images"))
+    test_videos_dir: str = field(default_factory=lambda: os.path.join(_SCRIPT_DIR, "test_videos"))
+    output_dir: str = field(default_factory=lambda: os.path.join(_SCRIPT_DIR, "结果"))
+    log_dir: str = field(default_factory=lambda: os.path.join(_SCRIPT_DIR, "logs"))
     config_file: str = ""
 
 
