@@ -179,4 +179,5 @@ if __name__ == "__main__":
     # detect_image("data/test_images/solidWhiteCurve.jpg")
 
     # 视频：稳定不闪烁
-    detect_video("data/test_videos/solidWhiteRight.mp4")
+    # detect_video("data/test_videos/solidWhiteRight.mp4")
+    detect_video("data/test_videos/testVideo2.mp4")
