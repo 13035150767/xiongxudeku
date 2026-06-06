@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>智能交通检测系统 - OpenCV & YOLOv8</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+    <header class="header">
+        <div class="header-inner">
+            <div class="logo">
+                <svg width="36" height="36" viewBox="0 0 36 36" fill="none">
+                    <path d="M4 28L14 8H22L32 28" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+                    <path d="M8 28L16 12" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+                    <path d="M28 28L20 12" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+                    <circle cx="18" cy="28" r="3" fill="currentColor"/>
+                </svg>
+                <h1>智能交通检测系统</h1>
+            </div>
+            <span class="subtitle">OpenCV + YOLOv8</span>
+        </div>
+    </header>
+
+    <main class="main">
+        <div class="layout">
+            <aside class="sidebar">
+                <section class="card">
+                    <h2 class="card-title"><span class="icon">🎯</span> 检测模式</h2>
+                    <div class="mode-tabs">
+                        <button class="mode-tab active" data-mode="lane">车道线检测</button>
+                        <button class="mode-tab" data-mode="traffic">分割车流量</button>
+                        <button class="mode-tab" data-mode="speed">车速检测</button>
+                        <button class="mode-tab" data-mode="heatmap">热力图</button>
+                        <button class="mode-tab" data-mode="lane_occupancy">车道占用</button>
+                    </div>
+                </section>
+
+                <section class="card">
+                    <h2 class="card-title"><span class="icon">📁</span> 上传文件</h2>
+                    <div class="upload-area" id="uploadArea">
+                        <div class="upload-hint">
+                            <svg width="48" height="48" viewBox="0 0 48 48" fill="none">
+                                <path d="M24 32V16M24 16L18 22M24 16L30 22" stroke="#6366f1" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+                                <path d="M40 32V36C40 38.2091 38.2091 40 36 40H12C9.79086 40 8 38.2091 8 36V32" stroke="#6366f1" stroke-width="2.5" stroke-linecap="round"/>
+                            </svg>
+                            <p>拖拽文件到此处或点击上传</p>
+                            <span class="upload-formats">支持 JPG / PNG / MP4 / AVI</span>
+                        </div>
+                        <input type="file" id="fileInput" accept="image/*,video/*" hidden>
+                    </div>
+                    <div class="file-info" id="fileInfo" style="display:none">
+                        <span id="fileName"></span>
+                        <button class="btn-icon" id="clearFile" title="清除">×</button>
+                    </div>
+                </section>
+
+                <section class="card" id="laneParams">
+                    <h2 class="card-title"><span class="icon">⚙️</span> 车道线参数</h2>
+                    <div class="param-group">
+                        <label class="param-label"><span>颜色空间</span>
+                            <select id="useHsl" class="param-select">
+                                <option value="true" selected>HSL</option>
+                                <option value="false">RGB</option>
+                            </select>
+                        </label>
+                    </div>
+                    <div class="param-group">
+                        <label class="param-label"><span>Canny 低阈值</span><span class="param-value" id="canny1Val">50</span></label>
+                        <input type="range" id="cannyThreshold1" min="10" max="200" value="50" class="slider">
+                    </div>
+                    <div class="param-group">
+                        <label class="param-label"><span>Canny 高阈值</span><span class="param-value" id="canny2Val">150</span></label>
+                        <input type="range" id="cannyThreshold2" min="50" max="300" value="150" class="slider">
+                    </div>
+                    <div class="param-group">
+                        <label class="param-label"><span>高斯核大小</span><span class="param-value" id="gaussVal">5</span></label>
+                        <input type="range" id="gaussianKernel" min="1" max="15" value="5" step="2" class="slider">
+                    </div>
+                    <div class="param-group">
+                        <label class="param-label"><span>霍夫投票阈值</span><span class="param-value" id="houghThVal">15</span></label>
+                        <input type="range" id="houghThreshold" min="5" max="80" value="15" class="slider">
+                    </div>
+                    <div class="param-group">
+                        <label class="param-label"><span>最小线段长度</span><span class="param-value" id="houghMinVal">40</span></label>
+                        <input type="range" id="houghMinLineLength" min="5" max="150" value="40" class="slider">
+                    </div>
+                    <div class="param-group">
+                        <label class="param-label"><span>最大线段间隔</span><span class="param-value" id="houghGapVal">20</span></label>
+                        <input type="range" id="houghMaxLineGap" min="5" max="80" value="20" class="slider">
+                    </div>
+                </section>
+
+                <section class="card" id="yoloParams" style="display:none">
+                    <h2 class="card-title"><span class="icon">🤖</span> YOLOv8 参数</h2>
+                    <div class="param-group">
+                        <label class="param-label"><span>置信度阈值</span><span class="param-value" id="confVal">0.25</span></label>
+                        <input type="range" id="confThreshold" min="0.05" max="0.95" value="0.25" step="0.05" class="slider">
+                    </div>
+                </section>
+
+                <button class="btn-primary btn-full" id="detectBtn" disabled>
+                    <span class="btn-spinner" id="btnSpinner" style="display:none"></span>
+                    <span id="btnText">开始检测</span>
+                </button>
+
+                <section class="card" id="pipelineCard">
+                    <h2 class="card-title"><span class="icon">📖</span> 算法流程</h2>
+                    <div class="pipeline" id="pipelineLane">
+                        <div class="pipeline-step" data-step="original"><div class="pipeline-dot"></div><span>原始图像</span></div>
+                        <div class="pipeline-step" data-step="color_filter"><div class="pipeline-dot"></div><span>颜色过滤</span></div>
+                        <div class="pipeline-step" data-step="grayscale"><div class="pipeline-dot"></div><span>灰度化</span></div>
+                        <div class="pipeline-step" data-step="gaussian_blur"><div class="pipeline-dot"></div><span>高斯滤波</span></div>
+                        <div class="pipeline-step" data-step="canny_edge"><div class="pipeline-dot"></div><span>Canny 边缘检测</span></div>
+                        <div class="pipeline-step" data-step="roi"><div class="pipeline-dot"></div><span>感兴趣区域</span></div>
+                        <div class="pipeline-step" data-step="hough_lines"><div class="pipeline-dot"></div><span>霍夫线检测</span></div>
+                        <div class="pipeline-step" data-step="result"><div class="pipeline-dot result-dot"></div><span>检测结果</span></div>
+                    </div>
+                    <div class="pipeline" id="pipelineYolo" style="display:none">
+                        <div class="pipeline-step"><div class="pipeline-dot"></div><span>YOLOv8 目标检测</span></div>
+                        <div class="pipeline-step"><div class="pipeline-dot"></div><span>车辆分类与追踪</span></div>
+                        <div class="pipeline-step"><div class="pipeline-dot"></div><span>数据分析计算</span></div>
+                        <div class="pipeline-step"><div class="pipeline-dot result-dot"></div><span>可视化输出</span></div>
+                    </div>
+                </section>
+            </aside>
+
+            <div class="content">
+                <div class="placeholder" id="placeholder">
+                    <svg width="120" height="120" viewBox="0 0 120 120" fill="none">
+                        <rect x="10" y="30" width="100" height="70" rx="8" stroke="#334155" stroke-width="2"/>
+                        <path d="M10 75L40 55L65 70L85 50L110 65" stroke="#6366f1" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                        <circle cx="35" cy="48" r="8" stroke="#6366f1" stroke-width="2"/>
+                    </svg>
+                    <h3>上传图片或视频开始智能交通检测</h3>
+                    <p>支持车道线检测、车流量统计、车速估算、热力图分析</p>
+                </div>
+
+                <div class="results-grid" id="resultsGrid" style="display:none">
+                    <div class="result-card" data-step="original">
+                        <div class="result-header"><span class="result-step">Step 1</span><span class="result-title">原始图像</span></div>
+                        <div class="result-img-wrap"><img id="step_original" src="" alt="原始图像"></div>
+                    </div>
+                    <div class="result-card" data-step="color_filter">
+                        <div class="result-header"><span class="result-step">Step 2</span><span class="result-title">颜色过滤</span></div>
+                        <div class="result-img-wrap"><img id="step_color_filter" src="" alt="颜色过滤"></div>
+                    </div>
+                    <div class="result-card" data-step="grayscale">
+                        <div class="result-header"><span class="result-step">Step 3</span><span class="result-title">灰度化</span></div>
+                        <div class="result-img-wrap"><img id="step_grayscale" src="" alt="灰度化"></div>
+                    </div>
+                    <div class="result-card" data-step="gaussian_blur">
+                        <div class="result-header"><span class="result-step">Step 4</span><span class="result-title">高斯滤波去噪</span></div>
+                        <div class="result-img-wrap"><img id="step_gaussian_blur" src="" alt="高斯滤波"></div>
+                    </div>
+                    <div class="result-card" data-step="canny_edge">
+                        <div class="result-header"><span class="result-step">Step 5</span><span class="result-title">Canny 边缘检测</span></div>
+                        <div class="result-img-wrap"><img id="step_canny_edge" src="" alt="Canny边缘检测"></div>
+                    </div>
+                    <div class="result-card" data-step="roi">
+                        <div class="result-header"><span class="result-step">Step 6</span><span class="result-title">感兴趣区域</span></div>
+                        <div class="result-img-wrap"><img id="step_roi" src="" alt="ROI"></div>
+                    </div>
+                    <div class="result-card" data-step="hough_lines">
+                        <div class="result-header"><span class="result-step">Step 7</span><span class="result-title">霍夫线检测</span></div>
+                        <div class="result-img-wrap"><img id="step_hough_lines" src="" alt="霍夫线检测"></div>
+                    </div>
+                    <div class="result-card result-final" data-step="result">
+                        <div class="result-header"><span class="result-step highlight">Step 8</span><span class="result-title">检测结果</span></div>
+                        <div class="result-img-wrap"><img id="step_result" src="" alt="检测结果"></div>
+                    </div>
+                </div>
+
+                <div class="yolo-result" id="yoloResult" style="display:none">
+                    <div class="stats-bar" id="statsBar"></div>
+                    <div class="result-card result-final">
+                        <div class="result-header">
+                            <span class="result-step highlight" id="yoloResultLabel">检测结果</span>
+                            <span class="result-title" id="yoloResultTitle"></span>
+                        </div>
+                        <div class="result-img-wrap">
+                            <img id="yoloResultImg" src="" alt="检测结果">
+                        </div>
+                    </div>
+                </div>
+
+                <div class="video-result" id="videoResult" style="display:none">
+                    <div class="stats-bar" id="videoStatsBar"></div>
+                    <div class="result-card result-final">
+                        <div class="result-header">
+                            <span class="result-step highlight">视频处理结果</span>
+                            <span class="result-title" id="videoInfo"></span>
+                        </div>
+                        <div class="result-img-wrap video-wrap">
+                            <video id="resultVideo" controls></video>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </main>
+
+    <div class="toast" id="toast"></div>
+    <script src="/static/js/main.js"></script>
+</body>
+</html>
